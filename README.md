@@ -1,5 +1,7 @@
 # Audio Interlace
 
+[中文 README](README_CN.md)
+
 A sophisticated audio processing tool for interlacing stereo channels with intelligent silence-based segmentation and crossfading.
 
 ## Features
