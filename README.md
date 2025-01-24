@@ -148,3 +148,8 @@ python audio_interlace.py \
 ## License
 
 MIT License - See [LICENSE](LICENSE) for full text
+
+## Acknowledgments
+
+This project was developed with the assistance of the DeepSeek-R1 large language model for technical solution design and code optimization.  
+[DeepSeek Artificial Intelligence Research](https://www.deepseek.com)

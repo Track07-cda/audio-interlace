@@ -146,3 +146,8 @@ python audio_interlace.py \
 ## 许可证
 
 MIT 许可证 - 详见 [LICENSE](LICENSE)
+
+## 致谢
+
+本项目开发过程中使用了深度求索（DeepSeek-R1）大模型进行技术方案设计和代码优化。  
+[深度求索人工智能研究](https://www.deepseek.com)
