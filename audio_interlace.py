@@ -8,20 +8,28 @@ from itertools import zip_longest
 from tqdm import tqdm
 
 class AudioProcessor:
-    """音频处理核心类，负责声道分离、静音检测、片段处理等"""
+    """Core audio processing class for channel splitting, silence detection and segment processing"""
     
+    ENCODER_MAPPING = {
+        'flt': ('pcm_f32le', 32),
+        'fltp': ('pcm_f32le', 32),
+        's32': ('pcm_s32le', 32),
+        's16': ('pcm_s16le', 16),
+        's16p': ('pcm_s16le', 16),
+        'u8': ('pcm_u8', 8),
+        'u8p': ('pcm_u8', 8)
+    }
+
     def __init__(self, args):
         self.args = args
         self.logger = self._setup_logger()
         self.temp_dir = os.path.abspath(args.temp_dir)
-        self._prepare_directories()
-
-        # 获取输入文件的音频参数
         self.audio_params = self._get_audio_params(args.input)
-        self.logger.info(f"输入音频参数：{self.audio_params}")
+        self._prepare_directories()
+        self.logger.info(f"Input audio params: {self.audio_params}")
 
     def _setup_logger(self):
-        """配置日志记录器"""
+        """Initialize and configure logger"""
         logger = logging.getLogger('AudioProcessor')
         logger.setLevel(logging.INFO)
         handler = logging.StreamHandler()
@@ -30,13 +38,13 @@ class AudioProcessor:
         return logger
 
     def _prepare_directories(self):
-        """创建必要的临时目录"""
+        """Create required temporary directories"""
         os.makedirs(self.temp_dir, exist_ok=True)
-        for d in ['left', 'right']:
-            os.makedirs(os.path.join(self.temp_dir, d), exist_ok=True)
+        for channel in ['left', 'right']:
+            os.makedirs(os.path.join(self.temp_dir, channel), exist_ok=True)
 
     def process(self):
-        """主处理流程"""
+        """Main processing workflow"""
         try:
             left, right = self._split_channels()
             left_segments = self._process_channel(left, 'left')
@@ -47,22 +55,22 @@ class AudioProcessor:
                 self._cleanup()
 
     def _split_channels(self):
-        """分离左右声道"""
+        """Split stereo input into separate channel files"""
         self.logger.info("Splitting stereo channels...")
-        left = os.path.join(self.temp_dir, 'left.wav')
-        right = os.path.join(self.temp_dir, 'right.wav')
+        left_path = os.path.join(self.temp_dir, 'left.wav')
+        right_path = os.path.join(self.temp_dir, 'right.wav')
 
         subprocess.run([
             'ffmpeg', '-y', '-i', self.args.input,
             '-filter_complex', 'channelsplit=channel_layout=stereo[left][right]',
-            '-map', '[left]', left,
-            '-map', '[right]', right,
+            '-map', '[left]', left_path,
+            '-map', '[right]', right_path,
             '-loglevel', 'error'
         ], check=True)
-        return left, right
+        return left_path, right_path
 
     def _process_channel(self, input_file, channel):
-        """处理单个声道"""
+        """Process single audio channel"""
         self.logger.info(f"Processing {channel} channel...")
         duration = self._get_duration(input_file)
         silences = self._detect_silence(input_file)
@@ -70,14 +78,17 @@ class AudioProcessor:
         return self._split_and_fade(input_file, segments, channel)
 
     def _get_duration(self, input_file):
-        """获取音频时长"""
-        cmd = ['ffprobe', '-v', 'error', '-show_entries', 'format=duration',
-               '-of', 'json', input_file]
+        """Get audio duration in seconds"""
+        cmd = [
+            'ffprobe', '-v', 'error',
+            '-show_entries', 'format=duration',
+            '-of', 'json', input_file
+        ]
         result = subprocess.run(cmd, stdout=subprocess.PIPE)
         return float(json.loads(result.stdout)['format']['duration'])
 
     def _detect_silence(self, input_file):
-        """检测静音区间"""
+        """Detect silence intervals using FFmpeg"""
         self.logger.info(f"Detecting silence in {os.path.basename(input_file)}...")
         cmd = [
             'ffmpeg', '-i', input_file, '-af',
@@ -88,50 +99,56 @@ class AudioProcessor:
         return self._parse_silence(result.stderr)
 
     def _parse_silence(self, output):
-        """解析静音检测输出"""
+        """Parse FFmpeg silence detection output"""
         silences = []
+        current_silence = {}
         for line in output.split('\n'):
             if 'silence_start' in line:
-                start = float(line.split('silence_start: ')[1].split()[0])
+                current_silence['start'] = float(line.split('silence_start: ')[1].split()[0])
             if 'silence_end' in line:
-                end = float(line.split('silence_end: ')[1].split()[0])
-                silences.append((start, end))
+                current_silence['end'] = float(line.split('silence_end: ')[1].split()[0])
+                silences.append((current_silence['start'], current_silence['end']))
+                current_silence = {}
         return silences
 
     def _calculate_segments(self, silences, duration):
-        """计算有效片段"""
-        split_points = [(s + e) / 2 for s, e in silences]
+        """Calculate valid segments between silences"""
+        split_points = [(start + end)/2 for start, end in silences]
         segments = []
-        prev = 0.0
+        prev_point = 0.0
+        
         for point in split_points:
-            segments.append((prev, point))
-            prev = point
-        segments.append((prev, duration))
+            segments.append((prev_point, point))
+            prev_point = point
+        segments.append((prev_point, duration))
+        
         return self._merge_short_segments(segments)
 
     def _merge_short_segments(self, segments):
-        """合并过短片段"""
+        """Merge segments shorter than minimum duration"""
         merged = []
-        current = segments[0]
+        current_start, current_end = segments[0]
+        
         for seg in segments[1:]:
-            if seg[1] - current[0] < self.args.min_segment:
-                current = (current[0], seg[1])
+            if (seg[1] - current_start) < self.args.min_segment:
+                current_end = seg[1]
             else:
-                merged.append(current)
-                current = seg
-        merged.append(current)
+                merged.append((current_start, current_end))
+                current_start, current_end = seg
+        merged.append((current_start, current_end))
+        
         return merged
 
     def _split_and_fade(self, input_file, segments, channel):
-        """分割音频并添加淡入淡出效果"""
+        """Split audio with fade effects"""
         output_dir = os.path.join(self.temp_dir, channel)
-        fade_duration = self.args.fade / 1000
+        fade_duration = self.args.fade / 1000  # Convert ms to seconds
         outputs = []
 
         with tqdm(segments, desc=f"Processing {channel} segments") as pbar:
             for idx, (start, end) in enumerate(pbar):
                 output = self._process_segment(
-                    input_file, output_dir, idx, 
+                    input_file, output_dir, idx,
                     start, end, fade_duration, channel
                 )
                 outputs.append(output)
@@ -139,13 +156,12 @@ class AudioProcessor:
         return outputs
 
     def _get_audio_params(self, input_file):
-        """获取音频的原始格式参数"""
+        """Extract audio format parameters"""
         cmd = [
             'ffprobe', '-v', 'error',
             '-select_streams', 'a:0',
             '-show_entries', 'stream=sample_rate,sample_fmt,channels,bits_per_sample',
-            '-of', 'json',
-            input_file
+            '-of', 'json', input_file
         ]
         result = subprocess.run(cmd, stdout=subprocess.PIPE, check=True)
         info = json.loads(result.stdout)['streams'][0]
@@ -153,38 +169,17 @@ class AudioProcessor:
         return {
             'sample_rate': int(info['sample_rate']),
             'sample_fmt': info['sample_fmt'],
-            'bits_per_sample': int(info.get('bits_per_sample', 16)),  # 兼容不同版本ffprobe
+            'bits_per_sample': int(info.get('bits_per_sample', 16)),
             'channels': int(info['channels'])
         }
 
-    def _get_encoder_settings(self):
-        """根据采样格式确定正确的编码器参数"""
-        fmt_mapping = {
-            'flt': ('pcm_f32le', 32),
-            'fltp': ('pcm_f32le', 32),
-            's32': ('pcm_s32le', 32),
-            's16': ('pcm_s16le', 16),
-            's16p': ('pcm_s16le', 16),
-            'u8': ('pcm_u8', 8),
-            'u8p': ('pcm_u8', 8)
-        }
-        
-        sample_fmt = self.audio_params['sample_fmt']
-        if sample_fmt not in fmt_mapping:
-            raise ValueError(f"不支持的采样格式: {sample_fmt}")
-            
-        encoder, bits = fmt_mapping[sample_fmt]
-        return encoder, bits
-
     def _process_segment(self, input_file, output_dir, idx, start, end, fade_duration, channel):
-        """处理单个音频片段（修正编码器设置）"""
+        """Process individual audio segment"""
         output_file = os.path.abspath(os.path.join(output_dir, f'segment_{idx}.wav'))
         duration = end - start
         fade_out_start = max(0, duration - fade_duration)
+        encoder = self._get_encoder()
 
-        # 获取正确的编码器参数
-        encoder, _ = self._get_encoder_settings()
-        
         filters = [
             f"afade=in:st=0:d={fade_duration}",
             f"afade=out:st={fade_out_start}:d={fade_duration}",
@@ -192,7 +187,7 @@ class AudioProcessor:
         ]
         filter_chain = ",".join(filters)
 
-        cmd = [
+        subprocess.run([
             'ffmpeg', '-y',
             '-ss', str(start),
             '-to', str(end),
@@ -201,31 +196,36 @@ class AudioProcessor:
             '-ac', '2',
             '-ar', str(self.audio_params['sample_rate']),
             '-sample_fmt', self.audio_params['sample_fmt'],
-            '-c:a', encoder,  # 使用动态确定的编码器
+            '-c:a', encoder,
             '-loglevel', 'error',
             output_file
-        ]
-        subprocess.run(cmd, check=True)
+        ], check=True)
         return output_file
 
+    def _get_encoder(self):
+        """Get appropriate encoder based on sample format"""
+        sample_fmt = self.audio_params['sample_fmt']
+        if sample_fmt not in self.ENCODER_MAPPING:
+            raise ValueError(f"Unsupported sample format: {sample_fmt}")
+        return self.ENCODER_MAPPING[sample_fmt][0]
+
     def _get_pan_filter(self, channel):
-        """生成声道控制滤镜"""
+        """Generate pan filter for channel isolation"""
         return {
             'left': 'pan=stereo|c0=1*c0|c1=0*c0',
             'right': 'pan=stereo|c0=0*c0|c1=1*c0'
         }[channel]
 
     def _merge_segments(self, left, right):
-        """合并时保持编码器一致性"""
+        """Merge interleaved segments"""
         self.logger.info("Merging final audio...")
         concat_list = self._generate_concat_list(left, right)
-        encoder, _ = self._get_encoder_settings()
         
         subprocess.run([
             'ffmpeg', '-y',
             '-f', 'concat', '-safe', '0',
             '-i', concat_list,
-            '-c:a', encoder,
+            '-c:a', self._get_encoder(),
             '-ar', str(self.audio_params['sample_rate']),
             '-sample_fmt', self.audio_params['sample_fmt'],
             os.path.abspath(self.args.output),
@@ -233,7 +233,7 @@ class AudioProcessor:
         ], check=True)
 
     def _generate_concat_list(self, left, right):
-        """生成合并列表文件"""
+        """Generate concatenation list file"""
         concat_path = os.path.join(self.temp_dir, 'concat.txt')
         with open(concat_path, 'w') as f:
             for l, r in zip_longest(left, right):
@@ -242,30 +242,30 @@ class AudioProcessor:
         return concat_path
 
     def _cleanup(self):
-        """清理临时文件"""
+        """Clean up temporary files"""
         self.logger.info("Cleaning temporary files...")
         shutil.rmtree(self.temp_dir)
 
 def parse_args():
-    """解析命令行参数"""
-    parser = argparse.ArgumentParser(description='立体声音频交错处理器')
-    parser.add_argument('-i', '--input', required=True, help='输入音频文件')
-    parser.add_argument('-o', '--output', required=True, help='输出文件路径')
+    """Parse command line arguments"""
+    parser = argparse.ArgumentParser(description='Stereo Audio Interlacing Processor')
+    parser.add_argument('-i', '--input', required=True, help='Input audio file')
+    parser.add_argument('-o', '--output', required=True, help='Output file path')
     parser.add_argument('--fade', type=int, default=500, 
-                       help='淡入淡出时长（毫秒）')
+                      help='Crossfade duration in milliseconds (default: 500)')
     parser.add_argument('--min-segment', type=float, default=1.0,
-                       help='最小有效片段时长（秒）')
+                      help='Minimum segment duration in seconds (default: 1.0)')
     parser.add_argument('--min-silence', type=float, default=0.5,
-                       help='静音检测阈值时长（秒）')
+                      help='Minimum silence duration for split detection in seconds (default: 0.5)')
     parser.add_argument('--noise-level', type=float, default=-30.0,
-                       help='静音检测噪声阈值（dB）')
+                      help='Noise threshold for silence detection in dB (default: -30)')
     parser.add_argument('--temp-dir', default='temp', 
-                       help='临时文件目录')
+                      help='Temporary directory path (default: temp)')
     parser.add_argument('--keep-temp', action='store_true',
-                       help='保留临时文件')
+                      help='Keep temporary files after processing')
     return parser.parse_args()
 
 if __name__ == '__main__':
     processor = AudioProcessor(parse_args())
     processor.process()
-    print("处理完成！输出文件：", processor.args.output)
+    print("Processing completed! Output file:", processor.args.output)
