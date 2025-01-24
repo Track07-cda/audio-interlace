@@ -16,6 +16,10 @@ class AudioProcessor:
         self.temp_dir = os.path.abspath(args.temp_dir)
         self._prepare_directories()
 
+        # 获取输入文件的音频参数
+        self.audio_params = self._get_audio_params(args.input)
+        self.logger.info(f"输入音频参数：{self.audio_params}")
+
     def _setup_logger(self):
         """配置日志记录器"""
         logger = logging.getLogger('AudioProcessor')
@@ -134,13 +138,53 @@ class AudioProcessor:
                 pbar.set_postfix({"current": f"{end:.2f}s"})
         return outputs
 
+    def _get_audio_params(self, input_file):
+        """获取音频的原始格式参数"""
+        cmd = [
+            'ffprobe', '-v', 'error',
+            '-select_streams', 'a:0',
+            '-show_entries', 'stream=sample_rate,sample_fmt,channels,bits_per_sample',
+            '-of', 'json',
+            input_file
+        ]
+        result = subprocess.run(cmd, stdout=subprocess.PIPE, check=True)
+        info = json.loads(result.stdout)['streams'][0]
+        
+        return {
+            'sample_rate': int(info['sample_rate']),
+            'sample_fmt': info['sample_fmt'],
+            'bits_per_sample': int(info.get('bits_per_sample', 16)),  # 兼容不同版本ffprobe
+            'channels': int(info['channels'])
+        }
+
+    def _get_encoder_settings(self):
+        """根据采样格式确定正确的编码器参数"""
+        fmt_mapping = {
+            'flt': ('pcm_f32le', 32),
+            'fltp': ('pcm_f32le', 32),
+            's32': ('pcm_s32le', 32),
+            's16': ('pcm_s16le', 16),
+            's16p': ('pcm_s16le', 16),
+            'u8': ('pcm_u8', 8),
+            'u8p': ('pcm_u8', 8)
+        }
+        
+        sample_fmt = self.audio_params['sample_fmt']
+        if sample_fmt not in fmt_mapping:
+            raise ValueError(f"不支持的采样格式: {sample_fmt}")
+            
+        encoder, bits = fmt_mapping[sample_fmt]
+        return encoder, bits
+
     def _process_segment(self, input_file, output_dir, idx, start, end, fade_duration, channel):
-        """处理单个音频片段"""
+        """处理单个音频片段（修正编码器设置）"""
         output_file = os.path.abspath(os.path.join(output_dir, f'segment_{idx}.wav'))
         duration = end - start
         fade_out_start = max(0, duration - fade_duration)
 
-        # 构建滤镜链
+        # 获取正确的编码器参数
+        encoder, _ = self._get_encoder_settings()
+        
         filters = [
             f"afade=in:st=0:d={fade_duration}",
             f"afade=out:st={fade_out_start}:d={fade_duration}",
@@ -148,16 +192,20 @@ class AudioProcessor:
         ]
         filter_chain = ",".join(filters)
 
-        subprocess.run([
+        cmd = [
             'ffmpeg', '-y',
             '-ss', str(start),
             '-to', str(end),
             '-i', input_file,
             '-filter_complex', filter_chain,
             '-ac', '2',
+            '-ar', str(self.audio_params['sample_rate']),
+            '-sample_fmt', self.audio_params['sample_fmt'],
+            '-c:a', encoder,  # 使用动态确定的编码器
             '-loglevel', 'error',
             output_file
-        ], check=True)
+        ]
+        subprocess.run(cmd, check=True)
         return output_file
 
     def _get_pan_filter(self, channel):
@@ -168,14 +216,18 @@ class AudioProcessor:
         }[channel]
 
     def _merge_segments(self, left, right):
-        """合并交错片段"""
+        """合并时保持编码器一致性"""
         self.logger.info("Merging final audio...")
         concat_list = self._generate_concat_list(left, right)
+        encoder, _ = self._get_encoder_settings()
+        
         subprocess.run([
             'ffmpeg', '-y',
             '-f', 'concat', '-safe', '0',
             '-i', concat_list,
-            '-c', 'copy',
+            '-c:a', encoder,
+            '-ar', str(self.audio_params['sample_rate']),
+            '-sample_fmt', self.audio_params['sample_fmt'],
             os.path.abspath(self.args.output),
             '-loglevel', 'error'
         ], check=True)
