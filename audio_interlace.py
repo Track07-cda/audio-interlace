@@ -17,7 +17,9 @@ class AudioProcessor:
         's16': ('pcm_s16le', 16),
         's16p': ('pcm_s16le', 16),
         'u8': ('pcm_u8', 8),
-        'u8p': ('pcm_u8', 8)
+        'u8p': ('pcm_u8', 8),
+        'flac_s32': ('s32', 32),
+        'flac_s16': ('s16', 16)
     }
 
     def __init__(self, args):
@@ -25,6 +27,9 @@ class AudioProcessor:
         self.logger = self._setup_logger()
         self.temp_dir = os.path.abspath(args.temp_dir)
         self.audio_params = self._get_audio_params(args.input)
+        self.output_format = os.path.splitext(args.output)[1].lower().lstrip('.')
+        if self.output_format not in ['wav', 'flac']:
+            raise ValueError("Only support WAV/FLAC output formats")
         self._prepare_directories()
         self.logger.info(f"Input audio params: {self.audio_params}")
 
@@ -184,7 +189,6 @@ class AudioProcessor:
         output_file = os.path.abspath(os.path.join(output_dir, f'segment_{idx}.wav'))
         duration = end - start
         fade_out_start = max(0, duration - fade_duration)
-        encoder = self._get_encoder()
 
         filters = [
             f"afade=in:st=0:d={fade_duration}",
@@ -202,18 +206,26 @@ class AudioProcessor:
             '-ac', '2',
             '-ar', str(self.audio_params['sample_rate']),
             '-sample_fmt', self.audio_params['sample_fmt'],
-            '-c:a', encoder,
+            '-c:a', self._get_encoder(for_final=False),
             '-loglevel', 'error',
             output_file
         ], check=True)
         return output_file
 
-    def _get_encoder(self):
-        """Get appropriate encoder based on sample format"""
-        sample_fmt = self.audio_params['sample_fmt']
-        if sample_fmt not in self.ENCODER_MAPPING:
-            raise ValueError(f"Unsupported sample format: {sample_fmt}")
-        return self.ENCODER_MAPPING[sample_fmt][0]
+    def _get_encoder(self, for_final=False):
+        """获取编码器（中间处理用WAV，最终输出按格式）"""
+        if not for_final:
+            # 中间处理强制使用WAV编码
+            sample_fmt = self.audio_params['sample_fmt']
+            if sample_fmt not in self.ENCODER_MAPPING:
+                raise ValueError(f"Unsupported sample format: {sample_fmt}")
+            return self.ENCODER_MAPPING[sample_fmt][0]
+        
+        # 最终输出处理
+        if self.output_format == 'flac':
+            return 'flac'  # 始终使用flac编码器名称
+        else:
+            return self._get_encoder(for_final=False)
 
     def _get_pan_filter(self, channel):
         """Generate pan filter for channel isolation"""
@@ -245,13 +257,33 @@ class AudioProcessor:
                 linux_path = seg['path'].replace('\\', '/')
                 f.write(f"file '{linux_path}'\n")
 
+        # 自动处理格式转换
+        output_args = []
+        if self.output_format == 'flac':
+            # 确定最终样本格式
+            original_fmt = self.audio_params['sample_fmt']
+            target_fmt = 's32' if original_fmt in ['flt', 'fltp'] else original_fmt
+            
+            if target_fmt != original_fmt:
+                self.logger.warning(f"Converting {original_fmt} to {target_fmt} for FLAC output")
+                
+            output_args = [
+                '-compression_level', '8',
+                '-sample_fmt', target_fmt  # 显式设置目标格式
+            ]
+        else:
+            output_args = [
+                '-sample_fmt', self.audio_params['sample_fmt']
+            ]
+
         subprocess.run([
             'ffmpeg', '-y',
-            '-f', 'concat', '-safe', '0',
+            '-f', 'concat', 
+            '-safe', '0',
             '-i', concat_list,
-            '-c:a', self._get_encoder(),
+            '-c:a', self._get_encoder(for_final=True),
             '-ar', str(self.audio_params['sample_rate']),
-            '-sample_fmt', self.audio_params['sample_fmt'],
+            *output_args,
             os.path.abspath(self.args.output),
             '-loglevel', 'error'
         ], check=True)
@@ -265,7 +297,7 @@ def parse_args():
     """Parse command line arguments"""
     parser = argparse.ArgumentParser(description='Stereo Audio Interlacing Processor')
     parser.add_argument('-i', '--input', required=True, help='Input audio file')
-    parser.add_argument('-o', '--output', required=True, help='Output file path')
+    parser.add_argument('-o', '--output', required=True, help='Output file path (Support WAV/FLAC formats)')
     parser.add_argument('--fade', type=int, default=500, 
                       help='Crossfade duration in milliseconds (default: 500)')
     parser.add_argument('--min-segment', type=float, default=1.0,

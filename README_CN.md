@@ -60,14 +60,18 @@ python audio_interlace.py \
 
 ## 格式支持说明
 
-**当前仅支持WAV格式**  
+**FLAC输出注意事项**：
 
-- 输入文件必须为标准WAV格式
-- 输出文件将生成WAV格式
-- 保持原始PCM特性：
-  - 采样率（44.1k-384kHz）
-  - 位深度（16/24/32-bit）
-  - 声道配置
+- 自动处理浮点格式转换（32-bit浮点 → 32-bit整型）
+- 支持原生整型格式（16/24/32-bit）
+- 要求FFmpeg 4.3+ 并启用FLAC编码支持
+
+**验证FFmpeg配置**：
+
+```bash
+ffmpeg -encoders | grep flac
+# 应显示：FLAC (flac) 
+```
 
 ## 处理流程示例
 

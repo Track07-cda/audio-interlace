@@ -60,16 +60,20 @@ python audio_interlace.py \
   --min-silence 0.4
 ```
 
-## Format Support Notice
+## Format Support Notes
 
-**Currently supports WAV format exclusively**  
+**FLAC Output Considerations**:
 
-- Input files must be standard WAV format
-- Output will be generated as WAV file
-- Preserves original PCM characteristics:
-  - Sample rate (44.1k-384kHz)
-  - Bit depth (16/24/32-bit)
-  - Channel configuration
+- Automatic handling of floating-point format conversion (32-bit float → 32-bit integer)
+- Supports native integer formats (16/24/32-bit)
+- Requires FFmpeg 4.3+ with FLAC encoding support enabled
+
+**Verify FFmpeg Configuration**:
+
+```bash
+ffmpeg -encoders | grep flac
+# Should display: FLAC (flac)
+```
 
 ## Workflow Example
 
