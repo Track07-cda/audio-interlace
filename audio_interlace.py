@@ -151,7 +151,13 @@ class AudioProcessor:
                     input_file, output_dir, idx,
                     start, end, fade_duration, channel
                 )
-                outputs.append(output)
+                # Record each segment's time and path information
+                outputs.append({
+                    'start': start,
+                    'end': end,
+                    'path': output,
+                    'channel': channel
+                })
                 pbar.set_postfix({"current": f"{end:.2f}s"})
         return outputs
 
@@ -216,11 +222,29 @@ class AudioProcessor:
             'right': 'pan=stereo|c0=0*c0|c1=1*c0'
         }[channel]
 
-    def _merge_segments(self, left, right):
-        """Merge interleaved segments"""
-        self.logger.info("Merging final audio...")
-        concat_list = self._generate_concat_list(left, right)
+    def _merge_segments(self, left_segments, right_segments):
+        """Sort and merge all the segments"""
+        all_segments = left_segments + right_segments
         
+        # Sorted by starting time. Left channel first when having same time.
+        sorted_segments = sorted(all_segments, 
+                               key=lambda x: (x['start'], x['channel'] == 'right'))
+        
+        self.logger.info("Final segment order:")
+        for seg in sorted_segments:
+            self.logger.info(f"{seg['channel'].upper()} {seg['start']:.2f}s-{seg['end']:.2f}s")
+        
+        self._generate_final_output(sorted_segments)
+
+    def _generate_final_output(self, sorted_segments):
+        """Generate final output audio"""
+        concat_list = os.path.join(self.temp_dir, 'concat.txt')
+        
+        with open(concat_list, 'w') as f:
+            for seg in sorted_segments:
+                linux_path = seg['path'].replace('\\', '/')
+                f.write(f"file '{linux_path}'\n")
+
         subprocess.run([
             'ffmpeg', '-y',
             '-f', 'concat', '-safe', '0',
@@ -231,15 +255,6 @@ class AudioProcessor:
             os.path.abspath(self.args.output),
             '-loglevel', 'error'
         ], check=True)
-
-    def _generate_concat_list(self, left, right):
-        """Generate concatenation list file"""
-        concat_path = os.path.join(self.temp_dir, 'concat.txt')
-        with open(concat_path, 'w') as f:
-            for l, r in zip_longest(left, right):
-                if l: f.write(f"file '{l.replace('\\', '/')}'\n")
-                if r: f.write(f"file '{r.replace('\\', '/')}'\n")
-        return concat_path
 
     def _cleanup(self):
         """Clean up temporary files"""
